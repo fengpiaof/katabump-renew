@@ -1,48 +1,41 @@
-name: Katabump Auto Renew
+name: Katabump Token Renew
 
 on:
   schedule:
-    # 计划任务：每 3 天的 UTC 时间 02:00 运行一次
-    # (对应北京时间上午 10:00)
     - cron: '0 2 */3 * *'
-  workflow_dispatch: # 允许手动点击按钮测试
+  workflow_dispatch:
 
 jobs:
   renew_job:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout Code (拉取代码)
+      - name: Checkout Code
         uses: actions/checkout@v3
 
-      - name: Set up Python (设置环境)
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install Chrome (安装浏览器)
+      - name: Install Chrome
         run: |
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
 
-      - name: Install Dependencies (安装依赖)
-        run: |
-          pip install -r requirements.txt
+      - name: Install Dependencies
+        run: pip install DrissionPage
 
-      - name: Run Renew Script (运行脚本)
+      - name: Run Renew Script
         env:
-          # 注入 GitHub Secrets
-          DISCORD_COOKIE_STRING: ${{ secrets.DISCORD_COOKIE_STRING }}
-          DISCORD_EMAIL: ${{ secrets.DISCORD_EMAIL }}
-          DISCORD_PASSWORD: ${{ secrets.DISCORD_PASSWORD }}
+          # ⚠️⚠️⚠️ 关键在这里！必须把 Secret 传递给环境变量 ⚠️⚠️⚠️
+          # 之前的配置是 DISCORD_COOKIE_STRING，现在必须改成下面这样：
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
         run: |
-          # 配置虚拟显示器以提高无头浏览器的稳定性
           export DISPLAY=:99
           sudo Xvfb -ac :99 -screen 0 1280x1024x16 > /dev/null 2>&1 &
-          # 运行 Python 脚本
           python main.py
       
-      # 如果脚本运行失败，上传截图以便排查
       - name: Upload Debug Screenshot
         if: failure()
         uses: actions/upload-artifact@v4
