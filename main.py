@@ -1,171 +1,236 @@
 import os
 import time
-# 引入 json 库来安全地处理字符串，防止引号报错
-import json 
+import json
 from DrissionPage import ChromiumPage, ChromiumOptions
 
-def handle_cloudflare(page):
-    """处理 Cloudflare 5秒盾"""
-    print("--- [检测] 正在检查 Cloudflare ---")
-    for _ in range(10):
+def handle_cloudflare(page, retries=5):
+    """
+    增强版 Cloudflare 处理逻辑
+    :param retries: 尝试次数
+    """
+    print(f"--- [安全检查] 正在扫描 Cloudflare 盾 ({retries}次尝试)... ---")
+    for i in range(retries):
         try:
-            # 如果没有盾，直接返回
+            # 1. 检查标题和页面内容
             title = page.title.lower()
-            if "just a moment" not in title and "cloudflare" not in title:
+            html = page.html.lower()
+            
+            # 如果看起来像正常页面，直接放行
+            if "dashboard" in page.url and "just a moment" not in title:
                 return True
             
-            # 寻找验证框 iframe
+            # 2. 寻找 Cloudflare 的特征 iframe
             iframe = page.get_frame('@src^https://challenges.cloudflare.com')
             if iframe:
-                print("--- 发现 CF 验证框，点击... ---")
+                print(f"--- [防御] 发现验证框 (第 {i+1} 次)，尝试突破... ---")
+                time.sleep(2) # 等待 iframe 加载完全
                 iframe.ele('tag:body').click()
+                time.sleep(5) # 点击后多等一会
+                page.refresh() # 刷新页面看是否过盾
                 time.sleep(3)
             else:
-                time.sleep(1)
-        except:
+                # 没有 iframe，可能是正在加载或者已经过了
+                if "just a moment" not in title and "verify" not in html:
+                    return True
+                time.sleep(2)
+        except Exception as e:
+            print(f"--- [警告] 过盾检测轻微异常: {e} ---")
             time.sleep(1)
     return False
 
+def find_element_robust(page, selectors, timeout=15):
+    """
+    多重保障查找元素
+    :param selectors: 一个包含多种查找方式的列表 [('text', 'Login'), ('css', '.btn')]
+    :param timeout: 超时时间
+    """
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        for method, value in selectors:
+            try:
+                if method == 'text':
+                    ele = page.ele(f'text:{value}')
+                elif method == 'css':
+                    ele = page.ele(f'css:{value}')
+                elif method == 'raw':
+                    ele = page.ele(value)
+                
+                if ele and ele.is_displayed(): # 必须是可见的
+                    return ele
+            except:
+                pass
+        time.sleep(1)
+    return None
+
 def job():
-    # --- 1. 初始化 ---
+    # --- 1. 浏览器初始化 (配置优化) ---
     co = ChromiumOptions()
     co.headless(True)
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-gpu')
     co.set_argument('--lang=zh-CN')
-    co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    # 模拟最新的 Chrome，防止被识别为机器人
+    co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
+    # 忽略证书错误
+    co.set_argument('--ignore-certificate-errors')
     
     page = ChromiumPage(co)
+    # 设置全局超时，防止卡死
+    page.set.timeout(20)
     
     try:
-        # ==================== 步骤 1: 使用 Token 登录 Discord ====================
-        print(">>> [1/6] 正在注入 Discord Token...")
+        # ==================== 步骤 1: 强力注入 Token ====================
+        print(">>> [1/7] 初始化环境与 Token 注入...")
         token = os.environ.get("DISCORD_TOKEN")
         if not token:
-            raise Exception("错误：未在 GitHub Secrets 中配置 DISCORD_TOKEN")
+            raise Exception("❌ 致命错误：Github Secrets 中未找到 DISCORD_TOKEN")
 
-        # 1. 先打开 Discord 登录页
-        page.get('https://discord.com/login', retry=2)
+        # 访问 Discord 之前先清空 Cookie，防止冲突
+        page.get('https://discord.com/login', retry=3, timeout=15)
+        page.clear_cookies()
+        
         handle_cloudflare(page)
 
-        # 2. 通过 JS 注入 Token (修复了语法错误)
-        # Discord 要求 token 在 localStorage 里的格式必须是带双引号的字符串: "你的token"
-        # 我们使用 json.dumps 两次来确保格式绝对正确
-        # 第一次 dumps: token -> "token" (带引号的字符串)
-        # 第二次 dumps: "token" -> "\"token\"" (适合放入 JS 调用的格式)
-        
-        token_value = f'"{token}"'  # 这一步把 token 变成了 "token"
+        # 注入 Token
+        token_value = f'"{token}"'
         js_code = f"window.localStorage.setItem('token', '{token_value}');"
-        
-        # 打印生成的 JS 代码预览 (隐去敏感信息) 以便调试
-        print(f">>> 即将执行 JS: window.localStorage.setItem('token', '\"***\"');")
-        
         page.run_js(js_code)
         time.sleep(1)
         
-        # 3. 刷新页面，验证是否生效
-        print(">>> Token 注入完成，刷新页面验证...")
+        print(">>> Token 注入完毕，正在验证有效性...")
         page.refresh()
+        page.wait.load_start()
         time.sleep(5)
         
-        # 检查是否成功
+        # 验证 Token 是否有效
         if page.ele('css:input[name="email"]'):
-            # 尝试最后一次补救：有时候需要 reload 两次
-            page.refresh()
-            time.sleep(5)
-            if page.ele('css:input[name="email"]'):
-                page.get_screenshot(path='token_failed.jpg')
-                raise Exception("Token 注入失败：Discord 仍要求输入密码。可能是 Token 过期或格式不对。")
-        
-        print(">>> Discord 登录成功！(已跳过密码输入)")
-
-        # ==================== 步骤 2: 前往 Katabump ====================
-        print(">>> [2/6] 前往 Katabump...")
-        page.get('https://dashboard.katabump.com/auth/login', retry=2)
-        handle_cloudflare(page)
-
-        print(">>> 点击 'Login with Discord'...")
-        # 模糊查找按钮
-        discord_btn = page.ele('text:Login with Discord') or \
-                      page.ele('css:a[href*="discord"]')
-        
-        if discord_btn:
-            discord_btn.click()
+            print("⚠️ 警告：Discord Token 可能已失效（页面仍显示登录框）。尝试继续，依靠后续步骤...")
         else:
-            raise Exception("未找到登录按钮")
+            print(">>> ✅ Discord Token 有效，已跳过密码输入。")
 
-        print(">>> 跳转授权中...")
-        time.sleep(5)
-
-        # ==================== 步骤 3: 处理授权 ====================
-        if "discord.com" in page.url:
-            print(">>> [3/6] 处理 Discord 授权...")
-            handle_cloudflare(page)
+        # ==================== 步骤 2: 智能登录判断 ====================
+        print(">>> [2/7] 前往 Katabump 面板...")
+        # 直接访问 Dashboard 首页，而不是 Login 页，看看是不是直接能进
+        page.get('https://dashboard.katabump.com/', retry=3)
+        page.wait.load_start()
+        handle_cloudflare(page)
+        
+        # 状态检测：如果 URL 包含 login，说明被踢到了登录页
+        if "auth/login" in page.url:
+            print(">>> 检测到未登录状态，开始寻找登录按钮...")
             
-            # 寻找授权按钮
-            time.sleep(3)
-            auth_btn = page.ele('text:Authorize') or \
-                       page.ele('text:授权') or \
-                       page.ele('css:button div:contains("Authorize")')
+            # 【核心防护】多重手段找按钮
+            selectors = [
+                ('text', 'Login with Discord'),
+                ('text', 'Discord'),
+                ('css', 'a[href*="discord"]'), # 找包含 discord 链接的 a 标签
+                ('css', '.btn-primary') # 某些面板的主按钮就是登录
+            ]
             
-            if auth_btn:
-                print(">>> 点击授权按钮...")
-                auth_btn.click()
+            btn = find_element_robust(page, selectors, timeout=15)
+            
+            if btn:
+                print(f">>> ✅ 成功定位登录按钮 (文本: {btn.text})，点击中...")
+                btn.click()
             else:
-                print(">>> 未找到授权按钮（可能已自动授权），等待跳转...")
+                # 最后的挣扎：打印页面源码的前 500 个字，看看是不是白屏
+                print(f"DEBUG: 页面源码预览: {page.html[:200]}")
+                page.get_screenshot(path='login_btn_missing_debug.jpg')
+                raise Exception("❌ 无法找到登录按钮，页面可能加载失败或被拦截")
 
-        # ==================== 步骤 4: 验证是否进入面板 ====================
-        print(">>> [4/6] 等待跳转回 Katabump...")
-        for i in range(30):
+            print(">>> 跳转授权页...")
+            time.sleep(5)
+
+            # ==================== 步骤 3: Discord 授权 ====================
+            if "discord.com" in page.url:
+                print(">>> [3/7] 处理授权...")
+                handle_cloudflare(page)
+                
+                # 查找授权按钮
+                auth_selectors = [
+                    ('text', 'Authorize'),
+                    ('text', '授权'),
+                    ('css', 'button div:contains("Authorize")')
+                ]
+                auth_btn = find_element_robust(page, auth_selectors, timeout=8)
+                
+                if auth_btn:
+                    auth_btn.click()
+                    print(">>> 点击了授权按钮")
+                else:
+                    print(">>> 未发现授权按钮（可能已自动授权），跳过...")
+
+        else:
+            print(">>> ✅ 检测到已直接进入 Dashboard，跳过登录步骤！")
+
+        # ==================== 步骤 4: 确认进入后台 ====================
+        print(">>> [4/7] 等待面板加载...")
+        is_logged_in = False
+        for i in range(20):
             if "katabump.com" in page.url and "login" not in page.url:
-                print("✅ 成功进入面板！")
+                is_logged_in = True
                 break
             time.sleep(1)
-            
-        if "login" in page.url:
-             page.get_screenshot(path='login_loop_fail.jpg')
-             raise Exception("登录循环失败：看起来又回到了登录页")
+        
+        if not is_logged_in:
+             page.get_screenshot(path='login_failed_final.jpg')
+             raise Exception("❌ 登录流程结束，但 URL 仍停留在登录页或外部页面")
 
-        # ==================== 步骤 5: 续期操作 ====================
+        # ==================== 步骤 5: 直达服务器 ====================
         target_url = "https://dashboard.katabump.com/servers/edit?id=197288"
-        print(f">>> [5/6] 进入服务器页面: {target_url}")
-        page.get(target_url)
+        print(f">>> [5/7] 进入服务器管理: {target_url}")
+        page.get(target_url, retry=3)
+        page.wait.load_start()
         time.sleep(5)
         handle_cloudflare(page)
 
-        # 查找续期按钮
-        main_renew = None
-        for text in ['Renew', '续期', 'Extend']:
-            btn = page.ele(f'text:{text}')
-            if btn and (btn.tag == 'button' or 'btn' in btn.attr('class', '')): 
-                main_renew = btn
-                break
+        # ==================== 步骤 6: 寻找续期入口 ====================
+        print(">>> [6/7] 寻找 Renew 按钮...")
+        renew_selectors = [
+            ('text', 'Renew'),
+            ('text', '续期'),
+            ('text', 'Extend'),
+            ('css', 'button:contains("Renew")')
+        ]
+        
+        main_renew = find_element_robust(page, renew_selectors, timeout=10)
         
         if main_renew:
+            # 滚动到元素可见，防止被底部栏遮挡
+            # page.scroll.to_see(main_renew) 
             main_renew.click()
-            print(">>> 点击 Renew，等待弹窗...")
+            print(">>> ✅ 点击主 Renew 按钮，等待弹窗...")
             time.sleep(3)
             
-            # ==================== 步骤 6: 弹窗确认 ====================
-            print(">>> [6/6] 处理弹窗...")
-            handle_cloudflare(page)
+            # ==================== 步骤 7: 弹窗终极验证 ====================
+            print(">>> [7/7] 处理弹窗验证...")
+            handle_cloudflare(page) # 再次检查弹窗里的 CF
             
-            modal = page.ele('css:.modal-content')
-            if modal:
-                final_btn = modal.ele('text:Renew') or modal.ele('css:button.btn-primary')
-                if final_btn:
-                    final_btn.click()
-                    print("✅✅✅ 续期任务完美完成！")
+            # 寻找弹窗容器
+            try:
+                modal = page.ele('css:.modal-content')
+                if modal:
+                    confirm_btn = find_element_robust(modal, [('text', 'Renew'), ('css', 'button.btn-primary')], timeout=5)
+                    if confirm_btn:
+                        confirm_btn.click()
+                        print("🎉🎉🎉 续期成功！任务完美结束！")
+                    else:
+                        print("❌ 弹窗已弹出，但找不到确认按钮")
                 else:
-                    print("❌ 弹窗里没找到按钮")
-            else:
-                print("❌ 没看到弹窗")
+                    print("❌ 找不到弹窗元素 (.modal-content)")
+            except Exception as e:
+                print(f"❌ 弹窗处理异常: {e}")
         else:
-            print("❌ 主界面没找到 Renew 按钮，可能不需要续期")
+            print("⚠️ 未找到 Renew 按钮。")
+            print("可能原因：1. 服务器未到期不需要续期；2. 页面布局改变；3. 加载失败。")
+            page.get_screenshot(path='no_renew_btn.jpg')
 
     except Exception as e:
-        print(f"❌ 运行失败: {e}")
-        page.get_screenshot(path='final_error.jpg', full_page=True)
+        print(f"❌ 脚本崩溃: {e}")
+        try:
+            page.get_screenshot(path='crash_report.jpg', full_page=True)
+        except:
+            pass
         exit(1)
     finally:
         page.quit()
