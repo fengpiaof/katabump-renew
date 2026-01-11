@@ -5,7 +5,6 @@ import zipfile
 import io
 import datetime
 import re
-import asyncio
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 # ==================== 基础工具 (保持不变) ====================
@@ -47,7 +46,6 @@ class Reporter:
         try:
             timestamp = datetime.datetime.now().strftime("%H%M%S")
             filename = f"{timestamp}_{name}.png"
-            # 关键修正：使用更底层的 get_screenshot 方法
             page.get_screenshot(path=filename, full_page=True)
             self.screenshots.append(filename)
             log(f"📸 已保存截图: {filename}")
@@ -58,22 +56,16 @@ class Reporter:
         if not self.screenshots: return "没有可上传的截图。"
         log(">>> 正在上传截图到 Telegra.ph...")
         try:
-            # 确保文件存在再上传
             valid_screenshots = [f for f in self.screenshots if os.path.exists(f)]
             if not valid_screenshots: return "没有有效的截图文件可上传。"
-            
             files_to_upload = [('file', (os.path.basename(f), open(f, 'rb'), 'image/png')) for f in valid_screenshots]
             upload_resp = self.session.post('https://telegra.ph/upload', files=files_to_upload, timeout=45)
-            
             if upload_resp.status_code != 200: return f"上传失败: {upload_resp.text}"
-            
             content_nodes = []
             for i, item in enumerate(upload_resp.json()):
                 src = item.get('src')
                 if src: content_nodes.append({"tag": "figure", "children": [{"tag": "img", "attrs": {"src": src}}, {"tag": "figcaption", "children": [os.path.basename(valid_screenshots[i])]}]})
-            
             create_page_resp = self.session.post('https://api.telegra.ph/createPage', data={'access_token': 'd525af2963a7633918569c76192a83e0c03423b98471415053f40f0653d9', 'title': f'Katabump 续期调试报告 - {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}', 'author_name': 'Auto-Renew Script', 'content': str(content_nodes).replace("'", '"')}, timeout=20)
-            
             if create_page_resp.status_code == 200 and create_page_resp.json().get('ok'):
                 page_url = create_page_resp.json()['result']['url']; log(f"✅ 截图报告已生成: {page_url}"); return page_url
             else: return f"创建页面失败: {create_page_resp.text}"
@@ -113,7 +105,7 @@ def analyze_page_alert(page):
     if success and success.states.is_displayed: log(f"⬇️ 绿色提示: {success.text}");log("🎉 \[结果\] 续期成功！"); return "SUCCESS"
     return "UNKNOWN"
 
-# ==================== 主程序（终极语法修正版） ====================
+# ==================== 主程序（最终“黑盒等待”版） ====================
 def job():
     reporter = Reporter()
     page = None
@@ -144,12 +136,10 @@ def job():
             log(f"\n🚀 \[Step 2\] 尝试续期 (第 {attempt} 次)..."); page.get(target_url); pass_full_page_shield(page)
             reporter.add_screenshot(page, f"02_attempt_{attempt}_main_page")
             
-            # 使用一个完整的 try/except/continue 块来包裹每一次尝试
             try:
                 renew_btn = page.wait.ele_displayed('css:button[data-bs-target="#renew-modal"]', timeout=30)
                 if not renew_btn:
-                    log("⚠️ 未能找到主页面的 Renew 按钮。");
-                    if analyze_page_alert(page) == "SUCCESS_TOO_EARLY": success = True; break
+                    if analyze_page_alert(page) == "SUCCESS_TOO_EARLY": success = True; final_status_message = "任务成功完成！状态: SUCCESS_TOO_EARLY"; break
                     continue
 
                 log(">>> 点击主页面 Renew 按钮..."); renew_btn.click(by_js=True)
@@ -157,28 +147,24 @@ def job():
                 if not modal: log("❌ 弹窗未出"); continue
                 
                 reporter.add_screenshot(page, f"03_attempt_{attempt}_modal_opened")
-                log(">>> \[操作\] 弹窗出现，开始手动处理Cloudflare验证...")
                 
-                iframe = modal.ele('css:iframe[src*="cloudflare"], iframe[src*="turnstile"]', timeout=10)
-                if iframe:
-                    log(">>> iframe 已找到，尝试主动点击Checkbox...");
-                    try:
-                        checkbox = iframe.ele('css:input[type="checkbox"]', timeout=5)
-                        if checkbox and checkbox.states.is_visible: checkbox.click(by_js=True); log(">>> ✅ 主动点击Checkbox完成。")
-                    except: log(">>> 未找到Checkbox，可能已被插件处理或无需点击。")
+                # ========== 最终的“黑盒等待”策略 ==========
+                log(">>> \[操作\] 弹窗出现，进入“黑盒”等待模式...")
+                log(">>> \[黑盒等待\] 给予插件 20 秒的独立工作时间，期间脚本不进行任何干扰...")
+                time.sleep(20)
+                log(">>> \[黑盒等待\] 等待结束。现在，我们假设验证已成功。")
+                reporter.add_screenshot(page, f"04_attempt_{attempt}_after_wait")
+                # ==========================================
                 
-                log(">>> \[观察\] 正在等待Renew按钮激活 (最多25秒)...")
-                final_renew_btn_selector = 'css:button[type="submit"].btn-primary:text("Renew")'
-                
-                # ========== 关键的语法修正 ==========
-                modal.wait.ele_to_be_enabled(final_renew_btn_selector, timeout=25)
-                # ====================================
-                
-                log("✅ Renew 按钮已激活！Cloudflare 验证通过！")
-                reporter.add_screenshot(page, f"04_attempt_{attempt}_button_enabled")
-                
-                final_renew_btn = modal.ele(final_renew_btn_selector)
-                log(">>> 点击已激活的 Renew 按钮..."); final_renew_btn.click(by_js=True)
+                final_renew_btn = modal.ele('css:button[type="submit"].btn-primary:text("Renew")')
+                if final_renew_btn and final_renew_btn.states.is_enabled:
+                    log(">>> Renew 按钮已激活，直接点击..."); 
+                    final_renew_btn.click(by_js=True)
+                else:
+                    log("⚠️ Renew 按钮未激活或未找到，尝试强制点击（如果存在）...");
+                    if final_renew_btn: final_renew_btn.click(by_js=True)
+                    else: raise Exception("在黑盒等待后，依然找不到最终的Renew按钮。")
+
                 log(">>> 等待最终响应 (8s)..."); time.sleep(8)
                 reporter.add_screenshot(page, f"05_attempt_{attempt}_after_submit")
                 
