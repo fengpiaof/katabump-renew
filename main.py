@@ -5,7 +5,7 @@ import zipfile
 import io
 import datetime
 import re
-import asyncio # 引入asyncio以备不时之需
+import asyncio
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 # ==================== 基础工具 ====================
@@ -20,10 +20,9 @@ def download_silk():
     log(">>> \[插件1\] 正在下载 Silk Privacy Pass...")
     try:
         url = "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=122.0&acceptformat=crx2,crx3&x=id%3Dajhmfdgkijocedmfjonnpjfojldioehi%26uc"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, stream=True, timeout=30)
+        resp = requests.get(url, stream=True, timeout=30)
         if resp.status_code == 200:
-            if not os.path.exists("extensions"): os.makedirs("extensions")
+            os.makedirs("extensions", exist_ok=True)
             with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
                 zf.extractall(extract_dir)
             return os.path.abspath(extract_dir)
@@ -35,13 +34,12 @@ def download_cf_autoclick():
     """【插件2】CF-AutoClick"""
     extract_root = "extensions/cf_autoclick_root"
     if not os.path.exists(extract_root):
-        log(">>> \[插件2\] 正在下载 CF-AutoClick (Master)...")
+        log(">>> \[插件2\] 正在下载 CF-AutoClick...")
         try:
             url = "https://codeload.github.com/tenacious6/cf-autoclick/zip/refs/heads/master"
-            headers = {"User-Agent": "Mozilla/5.0"}
-            resp = requests.get(url, headers=headers, stream=True, timeout=30)
+            resp = requests.get(url, stream=True, timeout=30)
             if resp.status_code == 200:
-                if not os.path.exists("extensions"): os.makedirs("extensions")
+                os.makedirs("extensions", exist_ok=True)
                 with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
                     zf.extractall(extract_root)
             else:
@@ -56,177 +54,111 @@ def download_cf_autoclick():
             return os.path.abspath(root)
     return None
 
+# ==================== 新增：截图上传与通知 ====================
+class Reporter:
+    def __init__(self):
+        self.screenshots = []
+        self.session = requests.Session()
+
+    def add_screenshot(self, page, name):
+        try:
+            timestamp = datetime.datetime.now().strftime("%H%M%S")
+            filename = f"{timestamp}_{name}.png"
+            # DrissionPage 使用 save 方法保存截图
+            page.save(save_path='.', file_name=filename)
+            self.screenshots.append(filename)
+            log(f"📸 已保存截图: {filename}")
+        except Exception as e:
+            log(f"⚠️ 截图失败: {e}")
+
+    def upload_to_telegraph(self) -> str:
+        if not self.screenshots:
+            return "没有可上传的截图。"
+        log(">>> 正在上传截图到 Telegra.ph...")
+        try:
+            files_to_upload = [('file', (os.path.basename(f), open(f, 'rb'), 'image/png')) for f in self.screenshots]
+            upload_resp = self.session.post('https://telegra.ph/upload', files=files_to_upload, timeout=45)
+            if upload_resp.status_code != 200:
+                return f"上传失败: {upload_resp.text}"
+
+            content_nodes = []
+            for i, item in enumerate(upload_resp.json()):
+                src = item.get('src')
+                if src:
+                    content_nodes.append({"tag": "figure", "children": [
+                        {"tag": "img", "attrs": {"src": src}},
+                        {"tag": "figcaption", "children": [os.path.basename(self.screenshots[i])]}
+                    ]})
+            
+            # 使用 requests.post 替代，因为 aiohttp 在这个同步函数中不适用
+            create_page_resp = self.session.post('https://api.telegra.ph/createPage', data={
+                'access_token': 'd525af2963a7633918569c76192a83e0c03423b98471415053f40f0653d9', # 匿名token
+                'title': f'Katabump 续期调试报告 - {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}',
+                'author_name': 'Auto-Renew Script',
+                'content': str(content_nodes).replace("'", '"')
+            }, timeout=20)
+            
+            if create_page_resp.status_code == 200 and create_page_resp.json().get('ok'):
+                page_url = create_page_resp.json()['result']['url']
+                log(f"✅ 截图报告已生成: {page_url}")
+                return page_url
+            else:
+                return f"创建页面失败: {create_page_resp.text}"
+        except Exception as e:
+            log(f"❌ 上传异常: {e}")
+            return f"上传截图时发生异常: {e}"
+        finally:
+            for f in self.screenshots:
+                try: os.remove(f)
+                except: pass
+
+    def send_telegram_notification(self, message: str):
+        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        if not all([token, chat_id]):
+            log("⚠️ Telegram Token 或 Chat ID 未设置，跳过通知。")
+            return
+        
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        data = {"chat_id": chat_id, "text": message, "parse_mode": "HTML", "disable_web_page_preview": False}
+        
+        try:
+            # 在同步函数中使用 requests
+            requests.post(url, json=data, timeout=20)
+            log("✅ Telegram 通知已发送。")
+        except Exception as e:
+            log(f"❌ Telegram 发送异常: {e}")
+
 # ==================== 核心逻辑 ====================
 def pass_full_page_shield(page):
-    """处理全屏盾"""
     for _ in range(3):
-        if "just a moment" in page.title.lower():
-            log("--- \[门神\] 全屏盾出现，等待双插件配合过盾...")
-            time.sleep(3)
-        else:
-            return True
-    return False
-
-def manual_click_checkbox(modal):
-    """【补刀逻辑】手动点击 checkbox"""
-    log(">>> \[补刀\] 检查是否需要手动点击...")
-    try:
-        iframe = modal.ele('css:iframe[src*="cloudflare"], iframe[src*="turnstile"]', timeout=3)
-        if iframe:
-            checkbox = iframe.ele('css:input[type="checkbox"]', timeout=2)
-            if checkbox and checkbox.states.is_visible:
-                log(">>> \[补刀\] 🎯 在 iframe 里点击 Checkbox！")
-                checkbox.click(by_js=True)
-                return True
-        checkbox_ext = modal.ele('css:input[type="checkbox"]', timeout=1)
-        if checkbox_ext and checkbox_ext.states.is_visible:
-            log(">>> \[补刀\] 🎯 在外部点击 Checkbox！")
-            checkbox_ext.click(by_js=True)
-            return True
-    except Exception:
-        pass # 找不到元素是正常的
-    log(">>> \[补刀\] 未找到需要点击的Checkbox (可能插件已完成点击)")
+        if "just a moment" in page.title.lower(): log("--- \[门神\] 全屏盾出现，等待..."); time.sleep(3)
+        else: return True
     return False
 
 def analyze_page_alert(page):
-    """解析结果"""
-    log(">>> \[系统\] 检查结果...")
-    danger = page.ele('css:.alert.alert-danger', timeout=3)
+    log(">>> \[系统\] 检查结果...");
+    danger = page.ele('css:.alert.alert-danger', timeout=3);
     if danger and danger.states.is_displayed:
-        text = danger.text
-        log(f"⬇️ 红色提示: {text}")
-        if "can't renew" in text.lower():
-            match = re.search(r'in (\d+) day', text)
-            days = match.group(1) if match else "?"
-            log(f"✅ \[结果\] 未到期 (等待 {days} 天)")
-            return "SUCCESS_TOO_EARLY"
-        elif "captcha" in text.lower():
-            return "FAIL_CAPTCHA"
+        text=danger.text;log(f"⬇️ 红色提示: {text}");
+        if "can't renew" in text.lower(): log(f"✅ \[结果\] 未到期"); return "SUCCESS_TOO_EARLY"
+        elif "captcha" in text.lower(): return "FAIL_CAPTCHA"
         return "FAIL_OTHER"
-    success = page.ele('css:.alert.alert-success', timeout=3)
-    if success and success.states.is_displayed:
-        log(f"⬇️ 绿色提示: {success.text}")
-        log("🎉 \[结果\] 续期成功！")
-        return "SUCCESS"
+    success = page.ele('css:.alert.alert-success', timeout=3);
+    if success and success.states.is_displayed: log(f"⬇️ 绿色提示: {success.text}");log("🎉 \[结果\] 续期成功！"); return "SUCCESS"
     return "UNKNOWN"
 
 # ==================== 主程序 ====================
 def job():
-    path_silk = download_silk()
-    path_cf = download_cf_autoclick()
-    
-    co = ChromiumOptions()
-    co.set_argument('--headless=new')
-    co.set_argument('--no-sandbox')
-    co.set_argument('--disable-gpu')
-    co.set_argument('--disable-dev-shm-usage')
-    co.set_argument('--window-size=1920,1080')
-    co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
-    
-    plugin_count = 0
-    if path_silk: co.add_extension(path_silk); plugin_count += 1
-    if path_cf: co.add_extension(path_cf); plugin_count += 1
-    log(f">>> \[浏览器\] 已挂载插件数量: {plugin_count}")
-        
-    co.auto_port()
-    page = ChromiumPage(co)
-    page.set.timeouts(15)
+    reporter = Reporter()
+    page = None
+    final_status_message = "任务因未知原因中断"
+    final_result = "UNKNOWN"
     
     try:
-        email = os.environ.get("KB_EMAIL")
-        password = os.environ.get("KB_PASSWORD")
-        target_url = os.environ.get("KB_RENEW_URL")
+        reporter.send_telegram_notification("🚀 **Katabump 自动续期任务开始...**")
         
-        if not all([email, password, target_url]): log("❌ 配置缺失"); exit(1)
-
-        log(">>> \[Step 1\] 登录...")
-        page.get('https://dashboard.katabump.com/auth/login')
-        pass_full_page_shield(page)
-        if page.ele('css:input[name="email"]'):
-            page.ele('css:input[name="email"]').input(email)
-            page.ele('css:input[name="password"]').input(password)
-            page.ele('css:button#submit').click()
-            page.wait.url_change('login', exclude=True, timeout=20)
-        
-        # Step 2: 循环重试
-        max_retries = 3
-        for attempt in range(1, max_retries + 1):
-            log(f"\n🚀 \[Step 2\] 尝试续期 (第 {attempt} 次)...")
-            page.get(target_url)
-            pass_full_page_shield(page)
-            
-            renew_btn = None
-            try:
-                renew_btn = page.wait.ele_displayed('css:button[data-bs-target="#renew-modal"]', timeout=30)
-            except Exception as e:
-                log(f"⚠️ 在30秒内未能找到主页面的 Renew 按钮: {e}")
-
-            if renew_btn:
-                log(">>> 点击主页面 Renew 按钮...")
-                renew_btn.click(by_js=True)
-                
-                log(">>> 等待弹窗出现...")
-                modal = page.ele('css:.modal-content', timeout=10)
-                
-                if modal:
-                    log(">>> \[操作\] 弹窗出现，开始处理Cloudflare验证...")
-                    iframe = modal.ele('css:iframe[src*="cloudflare"], iframe[src*="turnstile"]', timeout=10)
-                    if not iframe:
-                        log("⚠️ 在弹窗中未能找到Cloudflare iframe，流程可能已改变。")
-                        continue
-                    
-                    log(">>> iframe 已找到，给予插件5秒优先处理时间...")
-                    time.sleep(5)
-                    
-                    manual_click_checkbox(modal)
-
-                    log(">>> \[观察\] 正在等待Cloudflare验证通过 (寻找绿勾)...")
-                    try:
-                        success_indicator = iframe.ele('css:.success, [data-theme="success"]')
-                        success_indicator.wait.displayed(timeout=20)
-                        log("✅ Cloudflare 验证通过！(已找到绿勾)")
-                    except Exception as e:
-                        log(f"⚠️ 等待“绿勾”超时: {e}")
-                        log("⚠️ 无法确认验证是否成功，但将继续尝试提交...")
-                    
-                    time.sleep(2)
-                    final_renew_btn = modal.ele('css:button[type="submit"].btn-primary:text("Renew")')
-                    
-                    if final_renew_btn:
-                        log(">>> 点击弹窗右下角的 Renew 按钮...")
-                        final_renew_btn.click(by_js=True)
-                        log(">>> 等待最终响应 (5s)...")
-                        time.sleep(5)
-                        
-                        result = analyze_page_alert(page)
-                        if result in ["SUCCESS", "SUCCESS_TOO_EARLY"]:
-                            break
-                        if result == "FAIL_CAPTCHA":
-                            log("⚠️ 提交后，服务器返回验证失败，刷新重试...")
-                            time.sleep(2)
-                            continue
-                    else:
-                        log("❌ 找不到弹窗右下角的 Renew 按钮。")
-                else:
-                    log("❌ 弹窗未出")
-            else:
-                log("⚠️ 在等待后，依然未找到主页面按钮。检查页面最终状态...")
-                result = analyze_page_alert(page)
-                if result == "SUCCESS_TOO_EARLY":
-                    break
-            
-            if attempt == max_retries:
-                log("❌ 最大重试次数已达，任务终止。")
-                exit(1)
-                
-    except Exception as e:
-        log(f"❌ 异常: {e}")
-        page.save("debug_page.html") # 保存页面快照以供分析
-        log("ℹ️ 异常发生时的页面HTML已保存为 debug_page.html")
-        exit(1)
-    finally:
-        page.quit()
-
-if __name__ == "__main__":
-    job()
-
+        # --- 准备工作 ---
+        path_silk = download_silk()
+        path_cf = download_cf_autoclick()
+        co
