@@ -8,7 +8,7 @@ import re
 import asyncio
 from DrissionPage import ChromiumPage, ChromiumOptions
 
-# ==================== 基础工具 ====================
+# ==================== 基础工具 (保持不变) ====================
 def log(message):
     current_time = datetime.datetime.now().strftime("%H:%M:%S")
     print(f"\[{current_time}\] {message}", flush=True)
@@ -37,7 +37,7 @@ def download_cf_autoclick():
         if "manifest.json" in f: log(f"✅ \[插件2\] 路径锁定: {os.path.basename(r)}"); return os.path.abspath(r)
     return None
 
-# ==================== 截图上传与通知 ====================
+# ==================== 截图上传与通知 (保持不变) ====================
 class Reporter:
     def __init__(self):
         self.screenshots = []
@@ -85,7 +85,7 @@ class Reporter:
         except Exception as e:
             log(f"❌ Telegram 发送异常: {e}")
 
-# ==================== 核心逻辑 ====================
+# ==================== 核心逻辑 (保持不变) ====================
 def pass_full_page_shield(page):
     for _ in range(3):
         if "just a moment" in page.title.lower(): log("--- \[门神\] 全屏盾出现，等待..."); time.sleep(3)
@@ -104,27 +104,22 @@ def analyze_page_alert(page):
     if success and success.states.is_displayed: log(f"⬇️ 绿色提示: {success.text}");log("🎉 \[结果\] 续期成功！"); return "SUCCESS"
     return "UNKNOWN"
 
-# ==================== 主程序 ====================
+# ==================== 主程序（语法完整重构版） ====================
 def job():
     reporter = Reporter()
     page = None
     final_status_message = "任务因未知原因中断"
-    final_result = "UNKNOWN"
     
     try:
         reporter.send_telegram_notification("🚀 **Katabump 自动续期任务开始...**")
         
-        path_silk = download_silk()
-        path_cf = download_cf_autoclick()
-        co = ChromiumOptions()
-        co.set_argument('--headless=new');co.set_argument('--no-sandbox');co.set_argument('--disable-gpu');co.set_argument('--disable-dev-shm-usage');co.set_argument('--window-size=1920,1080');co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
+        path_silk = download_silk(); path_cf = download_cf_autoclick()
+        co = ChromiumOptions(); co.set_argument('--headless=new'); co.set_argument('--no-sandbox'); co.set_argument('--disable-gpu'); co.set_argument('--disable-dev-shm-usage'); co.set_argument('--window-size=1920,1080'); co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
         plugin_count = 0
         if path_silk: co.add_extension(path_silk); plugin_count += 1
         if path_cf: co.add_extension(path_cf); plugin_count += 1
         log(f">>> \[浏览器\] 已挂载插件数量: {plugin_count}")
-        co.auto_port()
-        page = ChromiumPage(co)
-        page.set.timeouts(20)
+        co.auto_port(); page = ChromiumPage(co); page.set.timeouts(20)
         
         email = os.environ.get("KB_EMAIL"); password = os.environ.get("KB_PASSWORD"); target_url = os.environ.get("KB_RENEW_URL")
         if not all([email, password, target_url]): raise Exception("环境变量KB_EMAIL, KB_PASSWORD, KB_RENEW_URL未设置")
@@ -135,34 +130,37 @@ def job():
             page.ele('css:input[name="email"]').input(email); page.ele('css:input[name="password"]').input(password); page.ele('css:button#submit').click()
             page.wait.url_change('login', exclude=True, timeout=20)
         
-        max_retries = 3
+        max_retries = 3; success = False
         for attempt in range(1, max_retries + 1):
             log(f"\n🚀 \[Step 2\] 尝试续期 (第 {attempt} 次)..."); page.get(target_url); pass_full_page_shield(page)
             reporter.add_screenshot(page, f"02_attempt_{attempt}_main_page")
             
-            renew_btn = page.wait.ele_displayed('css:button[data-bs-target="#renew-modal"]', timeout=30)
-            if not renew_btn: log("⚠️ 未能找到主页面的 Renew 按钮。"); continue
-            
-            log(">>> 点击主页面 Renew 按钮..."); renew_btn.click(by_js=True)
-            modal = page.wait.ele_displayed('css:.modal-content', timeout=10)
-            if not modal: log("❌ 弹窗未出"); continue
-            
-            reporter.add_screenshot(page, f"03_attempt_{attempt}_modal_opened")
-            log(">>> \[操作\] 弹窗出现，开始手动处理Cloudflare验证...")
-            
-            iframe = modal.ele('css:iframe[src*="cloudflare"], iframe[src*="turnstile"]', timeout=10)
-            if iframe:
-                log(">>> iframe 已找到，尝试主动点击Checkbox...");
-                try:
-                    checkbox = iframe.ele('css:input[type="checkbox"]', timeout=5)
-                    if checkbox and checkbox.states.is_visible: checkbox.click(by_js=True); log(">>> ✅ 主动点击Checkbox完成。")
-                except: log(">>> 未找到Checkbox，可能已被插件点击或无需点击。")
-            
-            log(">>> \[观察\] 正在等待Renew按钮激活 (最多25秒)...")
-            final_renew_btn_selector = 'css:button[type="submit"].btn-primary:text("Renew")'
-            
-            # ========== 关键的语法修正：将 try...except 块完整化 ==========
             try:
+                renew_btn = page.wait.ele_displayed('css:button[data-bs-target="#renew-modal"]', timeout=30)
+                if not renew_btn:
+                    log("⚠️ 未能找到主页面的 Renew 按钮。检查页面是否有最终提示...");
+                    # 在找不到按钮时，也检查一下是否已经成功或无需续期
+                    if analyze_page_alert(page) == "SUCCESS_TOO_EARLY": success = True; break
+                    continue
+
+                log(">>> 点击主页面 Renew 按钮..."); renew_btn.click(by_js=True)
+                modal = page.wait.ele_displayed('css:.modal-content', timeout=10)
+                if not modal: log("❌ 弹窗未出"); continue
+                
+                reporter.add_screenshot(page, f"03_attempt_{attempt}_modal_opened")
+                log(">>> \[操作\] 弹窗出现，开始处理Cloudflare验证...")
+                
+                iframe = modal.ele('css:iframe[src*="cloudflare"], iframe[src*="turnstile"]', timeout=10)
+                if iframe:
+                    log(">>> iframe 已找到，尝试主动点击Checkbox...");
+                    try:
+                        checkbox = iframe.ele('css:input[type="checkbox"]', timeout=5)
+                        if checkbox and checkbox.states.is_visible: checkbox.click(by_js=True); log(">>> ✅ 主动点击Checkbox完成。")
+                    except: log(">>> 未找到Checkbox，可能已被插件处理或无需点击。")
+                
+                log(">>> \[观察\] 正在等待Renew按钮激活 (最多25秒)...")
+                final_renew_btn_selector = 'css:button[type="submit"].btn-primary:text("Renew")'
+                
                 modal.wait.ele_enabled(final_renew_btn_selector, timeout=25)
                 log("✅ Renew 按钮已激活！Cloudflare 验证通过！")
                 reporter.add_screenshot(page, f"04_attempt_{attempt}_button_enabled")
@@ -172,4 +170,39 @@ def job():
                 log(">>> 等待最终响应 (8s)..."); time.sleep(8)
                 reporter.add_screenshot(page, f"05_attempt_{attempt}_after_submit")
                 
+                result = analyze_page_alert(page)
+                if result in ["SUCCESS", "SUCCESS_TOO_EARLY"]:
+                    final_status_message = f"任务成功完成！状态: {result}"; log(f"🎉 {final_status_message}"); success = True; break
+                elif result == "FAIL_CAPTCHA": log("⚠️ 提交后服务器返回验证失败，刷新重试..."); time.sleep(3); continue
+                else: log("❓ 发生未知错误，重试..."); continue
+
+            except Exception as e_inner:
+                log(f"⚠️ 第 {attempt} 次尝试中发生错误: {e_inner}"); reporter.add_screenshot(page, f"06_attempt_{attempt}_error"); continue
+
+        if not success:
+            final_status_message = "所有重试均失败"
+            raise Exception(final_status_message)
+
+    except Exception as e_outer:
+        final_status_message = f"发生严重异常: {e_outer}"
+        log(f"❌ {final_status_message}")
+        if page: reporter.add_screenshot(page, "99_CRITICAL_ERROR")
+    
+    finally:
+        log(f"🏁 任务结束。最终状态: {final_status_message}")
+        report_url = reporter.upload_to_telegraph()
+        
+        if "成功" in final_status_message or "未到期" in final_status_message:
+            notification_message = f"✅ **Katabump 续期任务成功！**\n\n<b>状态:</b>\n<code>{final_status_message}</code>\n\n<b>调试报告:</b>\n{report_url}"
+        else:
+            notification_message = f"❌ **Katabump 续期任务失败**\n\n<b>错误:</b>\n<code>{final_status_message}</code>\n\n<b>调试报告:</b>\n{report_url}"
             
+        reporter.send_telegram_notification(notification_message)
+        
+        if page: page.quit()
+        
+        if "成功" not in final_status_message and "未到期" not in final_status_message:
+            exit(1)
+
+if __name__ == "__main__":
+    job()
