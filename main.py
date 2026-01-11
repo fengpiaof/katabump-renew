@@ -47,7 +47,8 @@ class Reporter:
         try:
             timestamp = datetime.datetime.now().strftime("%H%M%S")
             filename = f"{timestamp}_{name}.png"
-            page.save(save_path='.', file_name=filename)
+            # 关键修正：使用更底层的 get_screenshot 方法
+            page.get_screenshot(path=filename, full_page=True)
             self.screenshots.append(filename)
             log(f"📸 已保存截图: {filename}")
         except Exception as e:
@@ -57,14 +58,22 @@ class Reporter:
         if not self.screenshots: return "没有可上传的截图。"
         log(">>> 正在上传截图到 Telegra.ph...")
         try:
-            files_to_upload = [('file', (os.path.basename(f), open(f, 'rb'), 'image/png')) for f in self.screenshots]
+            # 确保文件存在再上传
+            valid_screenshots = [f for f in self.screenshots if os.path.exists(f)]
+            if not valid_screenshots: return "没有有效的截图文件可上传。"
+            
+            files_to_upload = [('file', (os.path.basename(f), open(f, 'rb'), 'image/png')) for f in valid_screenshots]
             upload_resp = self.session.post('https://telegra.ph/upload', files=files_to_upload, timeout=45)
+            
             if upload_resp.status_code != 200: return f"上传失败: {upload_resp.text}"
+            
             content_nodes = []
             for i, item in enumerate(upload_resp.json()):
                 src = item.get('src')
-                if src: content_nodes.append({"tag": "figure", "children": [{"tag": "img", "attrs": {"src": src}}, {"tag": "figcaption", "children": [os.path.basename(self.screenshots[i])]}]})
+                if src: content_nodes.append({"tag": "figure", "children": [{"tag": "img", "attrs": {"src": src}}, {"tag": "figcaption", "children": [os.path.basename(valid_screenshots[i])]}]})
+            
             create_page_resp = self.session.post('https://api.telegra.ph/createPage', data={'access_token': 'd525af2963a7633918569c76192a83e0c03423b98471415053f40f0653d9', 'title': f'Katabump 续期调试报告 - {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}', 'author_name': 'Auto-Renew Script', 'content': str(content_nodes).replace("'", '"')}, timeout=20)
+            
             if create_page_resp.status_code == 200 and create_page_resp.json().get('ok'):
                 page_url = create_page_resp.json()['result']['url']; log(f"✅ 截图报告已生成: {page_url}"); return page_url
             else: return f"创建页面失败: {create_page_resp.text}"
@@ -104,7 +113,7 @@ def analyze_page_alert(page):
     if success and success.states.is_displayed: log(f"⬇️ 绿色提示: {success.text}");log("🎉 \[结果\] 续期成功！"); return "SUCCESS"
     return "UNKNOWN"
 
-# ==================== 主程序（语法完整重构版） ====================
+# ==================== 主程序（终极语法修正版） ====================
 def job():
     reporter = Reporter()
     page = None
@@ -135,11 +144,11 @@ def job():
             log(f"\n🚀 \[Step 2\] 尝试续期 (第 {attempt} 次)..."); page.get(target_url); pass_full_page_shield(page)
             reporter.add_screenshot(page, f"02_attempt_{attempt}_main_page")
             
+            # 使用一个完整的 try/except/continue 块来包裹每一次尝试
             try:
                 renew_btn = page.wait.ele_displayed('css:button[data-bs-target="#renew-modal"]', timeout=30)
                 if not renew_btn:
-                    log("⚠️ 未能找到主页面的 Renew 按钮。检查页面是否有最终提示...");
-                    # 在找不到按钮时，也检查一下是否已经成功或无需续期
+                    log("⚠️ 未能找到主页面的 Renew 按钮。");
                     if analyze_page_alert(page) == "SUCCESS_TOO_EARLY": success = True; break
                     continue
 
@@ -148,7 +157,7 @@ def job():
                 if not modal: log("❌ 弹窗未出"); continue
                 
                 reporter.add_screenshot(page, f"03_attempt_{attempt}_modal_opened")
-                log(">>> \[操作\] 弹窗出现，开始处理Cloudflare验证...")
+                log(">>> \[操作\] 弹窗出现，开始手动处理Cloudflare验证...")
                 
                 iframe = modal.ele('css:iframe[src*="cloudflare"], iframe[src*="turnstile"]', timeout=10)
                 if iframe:
@@ -161,7 +170,10 @@ def job():
                 log(">>> \[观察\] 正在等待Renew按钮激活 (最多25秒)...")
                 final_renew_btn_selector = 'css:button[type="submit"].btn-primary:text("Renew")'
                 
-                modal.wait.ele_enabled(final_renew_btn_selector, timeout=25)
+                # ========== 关键的语法修正 ==========
+                modal.wait.ele_to_be_enabled(final_renew_btn_selector, timeout=25)
+                # ====================================
+                
                 log("✅ Renew 按钮已激活！Cloudflare 验证通过！")
                 reporter.add_screenshot(page, f"04_attempt_{attempt}_button_enabled")
                 
