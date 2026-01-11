@@ -2,7 +2,10 @@ name: Katabump Auto Renew
 
 on:
   schedule:
-    - cron: '0 2 */383 * *'
+    # 每天凌晨2点 (UTC时间) 运行一次。
+    - cron: '0 2 * * *'
+  
+  # 允许您在 GitHub Actions 页面手动触发此工作流
   workflow_dispatch:
 
 jobs:
@@ -18,8 +21,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 👇👇👇 这一步绝对不能少！没有它 DrissionPage 启动不了 👇👇👇
-      - name: Install Chrome
+      - name: Install Google Chrome
         run: |
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
@@ -28,10 +30,34 @@ jobs:
         run: pip install DrissionPage requests
 
       - name: Run Renew Script
+        # 关键：即使此步骤失败，也要继续执行下一步，以便我们能上传失败时的截图
+        continue-on-error: true
+        id: renew_script # 给这个步骤一个ID，方便后续判断它是否成功
         env:
           KB_EMAIL: ${{ secrets.KB_EMAIL }}
           KB_PASSWORD: ${{ secrets.KB_PASSWORD }}
           KB_RENEW_URL: ${{ secrets.KB_RENEW_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # 启动 Python (带 -u 参数实时输出)
           python -u main.py
+
+      # ========== 关键修正：新增上传截图的步骤 ==========
+      - name: Upload Screenshots as Artifact
+        # 无论脚本成功还是失败，都执行此步骤
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # 将这个产物命名为 renewal-screenshots
+          name: renewal-screenshots
+          # 上传当前目录下所有以 .png 结尾的文件
+          path: ./\*.png
+          # 设置产物的保留天数
+          retention-days: 7
+      
+      # （可选）一个根据脚本运行结果决定是否失败工作流的步骤
+      - name: Check Script Result
+        if: steps.renew_script.outcome != 'success'
+        run: |
+          echo "Renew script failed. Check the logs and the uploaded screenshots artifact."
+          exit 1
